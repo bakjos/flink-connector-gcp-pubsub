@@ -17,10 +17,10 @@
 
 package org.apache.flink.streaming.examples.gcp.pubsub;
 
-import org.apache.flink.api.java.utils.ParameterTool;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.connectors.gcp.pubsub.PubSubSink;
 import org.apache.flink.streaming.connectors.gcp.pubsub.PubSubSource;
+import org.apache.flink.util.ParameterTool;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;

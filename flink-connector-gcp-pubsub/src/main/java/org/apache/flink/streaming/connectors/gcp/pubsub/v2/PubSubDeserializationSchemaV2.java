@@ -26,6 +26,7 @@ import javax.annotation.Nullable;
 
 import java.io.Serializable;
 
+/** Deserialization schema for {@link PubsubMessage}, used by {@link PubSubSource}. */
 public interface PubSubDeserializationSchemaV2<T> extends Serializable {
 
     static <T> PubSubDeserializationSchemaV2<T> dataOnly(DeserializationSchema<T> schema) {

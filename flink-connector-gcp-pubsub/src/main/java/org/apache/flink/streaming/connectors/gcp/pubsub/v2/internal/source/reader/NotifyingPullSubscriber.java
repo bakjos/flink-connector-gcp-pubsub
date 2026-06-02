@@ -14,22 +14,25 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.flink.streaming.connectors.gcp.pubsub.v2.internal.source.reader;
 
 import com.google.api.core.ApiFuture;
-import com.google.common.base.Optional;
 import com.google.pubsub.v1.PubsubMessage;
 
+import java.util.Optional;
+
+/** Pulls Pub/Sub messages and notifies the caller when more become available. */
 public interface NotifyingPullSubscriber {
-    /** Returns a {@link ApiFuture} that will be completed when messages are available to pull */
+    /** Returns a {@link ApiFuture} that will be completed when messages are available to pull. */
     ApiFuture<Void> notifyDataAvailable();
 
     /** Pulls a message if one is available. */
     Optional<PubsubMessage> pullMessage() throws Throwable;
 
     /**
-     * If there is an outstanding {@link ApiFuture} to notify when data is available, this method
-     * can be used to interrupt the notification
+     * Interrupts an outstanding {@link ApiFuture} returned by {@link #notifyDataAvailable()}, if
+     * any, so that the caller can stop waiting for new messages.
      */
     void interruptNotify();
 

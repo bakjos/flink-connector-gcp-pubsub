@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.flink.streaming.connectors.gcp.pubsub.v2.internal.source.reader;
 
 import org.apache.flink.api.connector.source.SourceOutput;
@@ -26,6 +27,7 @@ import com.google.pubsub.v1.PubsubMessage;
 
 import java.io.IOException;
 
+/** Emits records deserialized from {@link PubsubMessage} into the Flink source output. */
 public class PubSubRecordEmitter<T>
         implements RecordEmitter<PubsubMessage, T, SubscriptionSplitState> {
     private final PubSubDeserializationSchemaV2<T> deserializationSchema;

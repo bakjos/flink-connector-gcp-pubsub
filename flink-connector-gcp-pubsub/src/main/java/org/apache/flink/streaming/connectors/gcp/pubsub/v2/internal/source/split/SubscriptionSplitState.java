@@ -14,8 +14,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.flink.streaming.connectors.gcp.pubsub.v2.internal.source.split;
 
+/** Mutable per-split state holder used by the source reader. */
 public final class SubscriptionSplitState {
     private final SubscriptionSplit split;
 

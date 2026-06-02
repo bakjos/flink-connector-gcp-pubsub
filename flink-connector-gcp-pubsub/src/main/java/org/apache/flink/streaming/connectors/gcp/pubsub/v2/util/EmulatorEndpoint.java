@@ -17,9 +17,9 @@
 
 package org.apache.flink.streaming.connectors.gcp.pubsub.v2.util;
 
-import com.google.common.base.Optional;
-
 import javax.annotation.Nullable;
+
+import java.util.Optional;
 
 /**
  * Utility class used to help connect {@link PubSubSink} and {@link PubSubSource} to a Google Cloud

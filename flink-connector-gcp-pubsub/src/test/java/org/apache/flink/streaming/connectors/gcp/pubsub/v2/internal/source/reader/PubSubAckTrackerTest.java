@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.flink.streaming.connectors.gcp.pubsub.v2.internal.source.reader;
 
 import com.google.cloud.pubsub.v1.AckReplyConsumer;
@@ -26,6 +27,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
+/** Tests for {@link PubSubAckTracker}. */
 @RunWith(MockitoJUnitRunner.class)
 public class PubSubAckTrackerTest {
     PubSubAckTracker ackTracker;

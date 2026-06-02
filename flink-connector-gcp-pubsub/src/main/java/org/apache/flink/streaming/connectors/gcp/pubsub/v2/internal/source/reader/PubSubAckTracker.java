@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.flink.streaming.connectors.gcp.pubsub.v2.internal.source.reader;
 
 import com.google.cloud.pubsub.v1.AckReplyConsumer;
@@ -26,6 +27,7 @@ import java.util.Map;
 import java.util.SortedMap;
 import java.util.TreeMap;
 
+/** In-memory {@link AckTracker} that holds acks per checkpoint until that checkpoint completes. */
 public class PubSubAckTracker implements AckTracker {
     @GuardedBy("this")
     private final Map<String, AckReplyConsumer> pendingAcks = new HashMap<>();

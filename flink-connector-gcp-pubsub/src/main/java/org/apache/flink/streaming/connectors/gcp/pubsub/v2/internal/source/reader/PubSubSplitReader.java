@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.flink.streaming.connectors.gcp.pubsub.v2.internal.source.reader;
 
 import org.apache.flink.connector.base.source.reader.RecordsBySplits;
@@ -26,14 +27,14 @@ import com.google.api.core.ApiFuture;
 import com.google.api.core.ApiFutureCallback;
 import com.google.api.core.ApiFutures;
 import com.google.api.core.SettableApiFuture;
-import com.google.common.collect.ImmutableListMultimap;
-import com.google.common.collect.Multimap;
-import com.google.common.util.concurrent.MoreExecutors;
 import com.google.pubsub.v1.PubsubMessage;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
@@ -56,6 +57,9 @@ import java.util.function.LongSupplier;
  * stay under the configured cap, per split, computed from the previous-fetch timestamp.
  */
 public class PubSubSplitReader implements SplitReader<PubsubMessage, SubscriptionSplit> {
+    /** Executor that runs the {@link ApiFutureCallback} inline on the completing thread. */
+    private static final Executor DIRECT_EXECUTOR = Runnable::run;
+
     private final Map<String, NotifyingPullSubscriber> subscribers;
     private final Map<String, SubscriptionSplit> splitsById;
     private final Function<SubscriptionSplit, NotifyingPullSubscriber> factory;
@@ -100,15 +104,18 @@ public class PubSubSplitReader implements SplitReader<PubsubMessage, Subscriptio
         this.nanoTime = nanoTime;
     }
 
-    private Multimap<String, PubsubMessage> getMessages() throws Throwable {
-        ImmutableListMultimap.Builder<String, PubsubMessage> messages =
-                ImmutableListMultimap.builder();
+    private Map<String, List<PubsubMessage>> getMessages() throws Throwable {
+        Map<String, List<PubsubMessage>> messages = new HashMap<>();
         for (Map.Entry<String, NotifyingPullSubscriber> entry : subscribers.entrySet()) {
-            for (PubsubMessage m : entry.getValue().pullMessage().asSet()) {
-                messages.put(entry.getKey(), m);
-            }
+            entry.getValue()
+                    .pullMessage()
+                    .ifPresent(
+                            m ->
+                                    messages.computeIfAbsent(
+                                                    entry.getKey(), k -> new ArrayList<>())
+                                            .add(m));
         }
-        return messages.build();
+        return messages;
     }
 
     private ApiFuture<Void> notifyDataAvailable() {
@@ -138,7 +145,7 @@ public class PubSubSplitReader implements SplitReader<PubsubMessage, Subscriptio
                                             future.set(null);
                                         }
                                     },
-                                    MoreExecutors.directExecutor());
+                                    DIRECT_EXECUTOR);
                         });
         return future;
     }
@@ -187,7 +194,7 @@ public class PubSubSplitReader implements SplitReader<PubsubMessage, Subscriptio
         applyRateLimitThrottle();
         try {
             notifyDataAvailable().get();
-            getMessages().asMap().forEach(builder::addAll);
+            getMessages().forEach(builder::addAll);
         } catch (Throwable t) {
             throw new IOException(t);
         }

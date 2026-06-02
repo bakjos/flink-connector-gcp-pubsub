@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.flink.streaming.connectors.gcp.pubsub.v2.internal.source.reader;
 
 import com.google.api.core.ApiFuture;
@@ -30,12 +31,13 @@ import org.mockito.junit.MockitoJUnitRunner;
 
 import java.util.concurrent.ExecutionException;
 
-import static com.google.common.truth.Truth.assertThat;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.Assert.assertThrows;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/** Tests for {@link PubSubNotifyingPullSubscriber}. */
 @RunWith(MockitoJUnitRunner.class)
 public class PubSubNotifyingPullSubscriberTest {
     @Mock AckTracker mockAckTracker;

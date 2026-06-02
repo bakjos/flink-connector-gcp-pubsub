@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.flink.streaming.connectors.gcp.pubsub.v2.internal.source.reader;
 
 import org.apache.flink.api.connector.source.SourceOutput;
@@ -31,6 +32,7 @@ import org.mockito.junit.MockitoJUnitRunner;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/** Tests for {@link PubSubRecordEmitter}. */
 @RunWith(MockitoJUnitRunner.class)
 public class PubSubRecordEmitterTest {
     @Mock PubSubDeserializationSchemaV2 mockDeserializer;

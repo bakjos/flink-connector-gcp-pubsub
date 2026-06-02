@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.flink.streaming.connectors.gcp.pubsub.v2;
 
 import org.apache.flink.api.common.serialization.DeserializationSchema;
@@ -39,6 +40,7 @@ import org.apache.flink.streaming.connectors.gcp.pubsub.v2.internal.source.reade
 import org.apache.flink.streaming.connectors.gcp.pubsub.v2.internal.source.split.SubscriptionSplit;
 import org.apache.flink.streaming.connectors.gcp.pubsub.v2.internal.source.split.SubscriptionSplitSerializer;
 import org.apache.flink.streaming.connectors.gcp.pubsub.v2.util.EmulatorEndpoint;
+import org.apache.flink.util.Preconditions;
 import org.apache.flink.util.UserCodeClassLoader;
 
 import com.google.api.gax.batching.FlowControlSettings;
@@ -52,13 +54,12 @@ import com.google.auto.value.AutoValue;
 import com.google.cloud.pubsub.v1.MessageReceiver;
 import com.google.cloud.pubsub.v1.Subscriber;
 import com.google.cloud.pubsub.v1.SubscriptionAdminSettings;
-import com.google.common.base.Optional;
-import com.google.common.base.Preconditions;
 import com.google.pubsub.v1.ProjectSubscriptionName;
 import com.google.pubsub.v1.PubsubMessage;
 import io.grpc.ManagedChannelBuilder;
 import org.threeten.bp.Duration;
 
+import java.util.Optional;
 import java.util.Set;
 
 /**
@@ -114,9 +115,9 @@ public abstract class PubSubSource<OutputT>
                         .build());
         builder.setFlowControlSettings(
                 FlowControlSettings.newBuilder()
-                        .setMaxOutstandingElementCount(maxOutstandingMessagesCount().or(1000L))
+                        .setMaxOutstandingElementCount(maxOutstandingMessagesCount().orElse(1000L))
                         .setMaxOutstandingRequestBytes(
-                                maxOutstandingMessagesBytes().or(100L * 1024L * 1024L)) // 100MB
+                                maxOutstandingMessagesBytes().orElse(100L * 1024L * 1024L)) // 100MB
                         .build());
         if (parallelPullCount().isPresent()) {
             builder.setParallelPullCount(parallelPullCount().get());
@@ -311,13 +312,13 @@ public abstract class PubSubSource<OutputT>
                     !source.subscriptionNames().isEmpty(),
                     "subscriptionNames must contain at least one subscription.");
             Preconditions.checkArgument(
-                    source.maxOutstandingMessagesCount().or(1L) > 0,
+                    source.maxOutstandingMessagesCount().orElse(1L) > 0,
                     "maxOutstandingMessagesCount, if set, must be a value greater than 0.");
             Preconditions.checkArgument(
-                    source.maxOutstandingMessagesBytes().or(1L) > 0,
+                    source.maxOutstandingMessagesBytes().orElse(1L) > 0,
                     "maxOutstandingMessagesBytes, if set, must be a value greater than 0.");
             Preconditions.checkArgument(
-                    source.parallelPullCount().or(1) > 0,
+                    source.parallelPullCount().orElse(1) > 0,
                     "parallelPullCount, if set, must be a value greater than 0.");
             return source;
         }

@@ -14,13 +14,15 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.flink.streaming.connectors.gcp.pubsub.v2.internal.source.split;
 
 import com.google.pubsub.v1.ProjectSubscriptionName;
 import org.junit.Test;
 
-import static com.google.common.truth.Truth.assertThat;
+import static org.assertj.core.api.Assertions.assertThat;
 
+/** Tests for {@link SubscriptionSplitSerializer}. */
 public class SubscriptionSplitSerializerTest {
 
     @Test

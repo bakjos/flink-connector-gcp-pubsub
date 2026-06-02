@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.flink.streaming.connectors.gcp.pubsub.v2.internal.source;
 
 import org.apache.flink.api.common.serialization.SimpleStringSchema;
@@ -26,6 +27,7 @@ import org.mockito.junit.MockitoJUnitRunner;
 
 import static org.junit.Assert.assertThrows;
 
+/** Tests for {@link PubSubSource}. */
 @RunWith(MockitoJUnitRunner.class)
 public class PubSubSourceV2Test {
     @Test

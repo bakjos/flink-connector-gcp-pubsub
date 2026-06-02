@@ -14,7 +14,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.flink.streaming.connectors.gcp.pubsub.v2.internal.source.reader;
+
+import org.apache.flink.annotation.VisibleForTesting;
 
 import com.google.api.core.ApiFuture;
 import com.google.api.core.ApiFutures;
@@ -24,31 +27,37 @@ import com.google.api.core.SettableApiFuture;
 import com.google.cloud.pubsub.v1.AckReplyConsumer;
 import com.google.cloud.pubsub.v1.MessageReceiver;
 import com.google.cloud.pubsub.v1.Subscriber;
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Optional;
-import com.google.common.util.concurrent.MoreExecutors;
 import com.google.errorprone.annotations.concurrent.GuardedBy;
 import com.google.pubsub.v1.PubsubMessage;
 
 import java.util.ArrayDeque;
 import java.util.Deque;
+import java.util.Optional;
+import java.util.concurrent.Executor;
 
+/** {@link NotifyingPullSubscriber} backed by a Pub/Sub {@link Subscriber}. */
 public class PubSubNotifyingPullSubscriber implements NotifyingPullSubscriber {
+    /** Thrown to wake up a caller blocked in {@link #notifyDataAvailable()}. */
     public static class SubscriberWakeupException extends Exception {}
 
+    /** Thrown when an operation is attempted on an already-shutdown subscriber. */
     public static class SubscriberShutdownException extends Exception {}
 
+    /** Factory for building the underlying {@link Subscriber} from a {@link MessageReceiver}. */
     public interface SubscriberFactory {
         Subscriber create(MessageReceiver receiver);
     }
 
+    /** Executor that runs the listener callback inline on the calling thread. */
+    private static final Executor DIRECT_EXECUTOR = Runnable::run;
+
     private final Subscriber subscriber;
 
     @GuardedBy("this")
-    private Optional<Throwable> permanentError = Optional.absent();
+    private Optional<Throwable> permanentError = Optional.empty();
 
     @GuardedBy("this")
-    private Optional<SettableApiFuture<Void>> notification = Optional.absent();
+    private Optional<SettableApiFuture<Void>> notification = Optional.empty();
 
     @GuardedBy("this")
     private final Deque<PubsubMessage> messages = new ArrayDeque<>();
@@ -66,7 +75,7 @@ public class PubSubNotifyingPullSubscriber implements NotifyingPullSubscriber {
                         completeNotification(Optional.of(throwable));
                     }
                 },
-                MoreExecutors.directExecutor());
+                DIRECT_EXECUTOR);
         this.subscriber.startAsync().awaitRunning();
     }
 
@@ -90,7 +99,7 @@ public class PubSubNotifyingPullSubscriber implements NotifyingPullSubscriber {
             throw permanentError.get();
         }
         if (messages.isEmpty()) {
-            return Optional.absent();
+            return Optional.empty();
         }
         return Optional.of(messages.pop());
     }
@@ -119,7 +128,7 @@ public class PubSubNotifyingPullSubscriber implements NotifyingPullSubscriber {
         }
         ackTracker.addPendingAck(message.getMessageId(), ackReplyConsumer);
         messages.add(message);
-        completeNotification(Optional.absent());
+        completeNotification(Optional.empty());
     }
 
     @VisibleForTesting
@@ -134,7 +143,7 @@ public class PubSubNotifyingPullSubscriber implements NotifyingPullSubscriber {
             } else {
                 notification.get().set(null);
             }
-            notification = Optional.absent();
+            notification = Optional.empty();
         }
     }
 }

@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.flink.streaming.connectors.gcp.pubsub.v2.internal.source.reader;
 
 import org.apache.flink.api.common.serialization.SimpleStringSchema;
@@ -26,7 +27,6 @@ import org.apache.flink.streaming.connectors.gcp.pubsub.v2.PubSubDeserialization
 import org.apache.flink.streaming.connectors.gcp.pubsub.v2.internal.source.split.SubscriptionSplit;
 import org.apache.flink.streaming.connectors.gcp.pubsub.v2.internal.source.split.SubscriptionSplitState;
 
-import com.google.common.collect.ImmutableList;
 import com.google.protobuf.ByteString;
 import com.google.pubsub.v1.ProjectSubscriptionName;
 import com.google.pubsub.v1.PubsubMessage;
@@ -36,14 +36,17 @@ import org.junit.runner.RunWith;
 import org.mockito.Mock;
 import org.mockito.junit.MockitoJUnitRunner;
 
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 
-import static com.google.common.truth.Truth.assertThat;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.Assert.assertThrows;
 import static org.mockito.Answers.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/** Tests for {@link PubSubSourceReader}. */
 @RunWith(MockitoJUnitRunner.class)
 public class PubSubSourceReaderTest {
     private final TestingReaderOutput<String> output = new TestingReaderOutput<>();
@@ -85,7 +88,7 @@ public class PubSubSourceReaderTest {
         RecordsBySplits.Builder<PubsubMessage> builder = new RecordsBySplits.Builder<>();
         builder.addAll(
                 split,
-                ImmutableList.of(
+                Arrays.asList(
                         PubsubMessage.newBuilder()
                                 .setData(ByteString.copyFromUtf8("message1"))
                                 .build(),
@@ -94,7 +97,7 @@ public class PubSubSourceReaderTest {
                                 .build()));
         when(mockSplitReader.fetch()).thenReturn(builder.build());
 
-        reader.addSplits(ImmutableList.of(split));
+        reader.addSplits(Collections.singletonList(split));
         while (output.getEmittedRecords().size() < 2) {
             reader.pollNext(output);
         }

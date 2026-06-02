@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.flink.streaming.connectors.gcp.pubsub.v2.internal.source.split;
 
 import org.apache.flink.core.io.SimpleVersionedSerializer;
@@ -21,6 +22,7 @@ import org.apache.flink.streaming.connectors.gcp.pubsub.proto.SubscriptionSplitP
 
 import java.io.IOException;
 
+/** Versioned serializer for {@link SubscriptionSplit}. */
 public final class SubscriptionSplitSerializer
         implements SimpleVersionedSerializer<SubscriptionSplit> {
     @Override
