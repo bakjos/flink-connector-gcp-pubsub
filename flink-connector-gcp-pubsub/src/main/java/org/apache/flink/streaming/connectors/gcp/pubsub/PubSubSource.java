@@ -17,6 +17,7 @@
 
 package org.apache.flink.streaming.connectors.gcp.pubsub;
 
+import org.apache.flink.api.common.functions.OpenContext;
 import org.apache.flink.api.common.functions.RuntimeContext;
 import org.apache.flink.api.common.io.ratelimiting.FlinkConnectorRateLimiter;
 import org.apache.flink.api.common.io.ratelimiting.GuavaFlinkConnectorRateLimiter;
@@ -25,10 +26,10 @@ import org.apache.flink.api.common.serialization.RuntimeContextInitializationCon
 import org.apache.flink.api.common.state.CheckpointListener;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.java.typeutils.ResultTypeQueryable;
-import org.apache.flink.configuration.Configuration;
+import org.apache.flink.configuration.CheckpointingOptions;
 import org.apache.flink.streaming.api.checkpoint.ListCheckpointed;
-import org.apache.flink.streaming.api.functions.source.ParallelSourceFunction;
-import org.apache.flink.streaming.api.functions.source.RichSourceFunction;
+import org.apache.flink.streaming.api.functions.source.legacy.ParallelSourceFunction;
+import org.apache.flink.streaming.api.functions.source.legacy.RichSourceFunction;
 import org.apache.flink.streaming.api.operators.StreamingRuntimeContext;
 import org.apache.flink.streaming.connectors.gcp.pubsub.common.AcknowledgeIdsForCheckpoint;
 import org.apache.flink.streaming.connectors.gcp.pubsub.common.AcknowledgeOnCheckpoint;
@@ -57,6 +58,7 @@ import static com.google.cloud.pubsub.v1.SubscriptionAdminSettings.defaultCreden
  * PubSub Source, this Source will consume PubSub messages from a subscription and Acknowledge them
  * on the next checkpoint. This ensures every message will get acknowledged at least once.
  */
+@Deprecated
 public class PubSubSource<OUT> extends RichSourceFunction<OUT>
         implements ResultTypeQueryable<OUT>,
                 ParallelSourceFunction<OUT>,
@@ -90,8 +92,8 @@ public class PubSubSource<OUT> extends RichSourceFunction<OUT>
     }
 
     @Override
-    public void open(Configuration configuration) throws Exception {
-        super.open(configuration);
+    public void open(OpenContext openContext) throws Exception {
+        super.open(openContext);
         if (hasNoCheckpointingEnabled(getRuntimeContext())) {
             throw new IllegalArgumentException(
                     "The PubSubSource REQUIRES Checkpointing to be enabled and "
@@ -102,10 +104,15 @@ public class PubSubSource<OUT> extends RichSourceFunction<OUT>
                 .getMetricGroup()
                 .gauge("PubSubMessagesProcessedNotAcked", this::getOutstandingMessagesToAck);
 
+        RuntimeContext runtimeContext = getRuntimeContext();
+        int parallelTasks = 1;
+        if (runtimeContext.getTaskInfo() != null) {
+            parallelTasks = runtimeContext.getTaskInfo().getNumberOfParallelSubtasks();
+        }
         // convert per-subtask-limit to global rate limit, as FlinkConnectorRateLimiter::setRate
         // expects a global rate limit.
         rateLimiter.setRate(
-                messagePerSecondRateLimit * getRuntimeContext().getNumberOfParallelSubtasks());
+                messagePerSecondRateLimit * parallelTasks);
         rateLimiter.open(getRuntimeContext());
         deserializationSchema.open(
                 RuntimeContextInitializationContextAdapters.deserializationAdapter(
@@ -117,7 +124,7 @@ public class PubSubSource<OUT> extends RichSourceFunction<OUT>
 
     private boolean hasNoCheckpointingEnabled(RuntimeContext runtimeContext) {
         return !(runtimeContext instanceof StreamingRuntimeContext
-                && ((StreamingRuntimeContext) runtimeContext).isCheckpointingEnabled());
+                && CheckpointingOptions.isCheckpointingEnabled (((StreamingRuntimeContext) runtimeContext).getJobConfiguration()));
     }
 
     @Override

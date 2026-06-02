@@ -3,7 +3,6 @@ package org.apache.flink.connector.gcp.pubsub.sink;
 import org.apache.flink.annotation.PublicEvolving;
 import org.apache.flink.api.common.serialization.SerializationSchema;
 import org.apache.flink.api.connector.sink2.Sink;
-import org.apache.flink.api.connector.sink2.SinkWriter;
 import org.apache.flink.api.connector.sink2.WriterInitContext;
 import org.apache.flink.connector.gcp.pubsub.sink.config.GcpPublisherConfig;
 import org.apache.flink.util.Preconditions;
@@ -70,12 +69,6 @@ public class PubSubSinkV2<T> implements Sink<T> {
         this.publisherConfig = publisherConfig;
         this.maxInFlightRequests = maxInFlightRequests;
         this.failOnError = failOnError;
-    }
-
-    @Override
-    public SinkWriter<T> createWriter(InitContext initContext) throws IOException {
-        throw new UnsupportedOperationException(
-                "Deprecated method. Use createWriter(WriterInitContext) instead.");
     }
 
     @Override

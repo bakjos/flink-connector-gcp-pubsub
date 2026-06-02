@@ -17,14 +17,13 @@
 
 package org.apache.flink.streaming.connectors.gcp.pubsub;
 
+import org.apache.flink.api.common.functions.OpenContext;
 import org.apache.flink.api.common.serialization.RuntimeContextInitializationContextAdapters;
 import org.apache.flink.api.common.serialization.SerializationSchema;
-import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.state.FunctionInitializationContext;
 import org.apache.flink.runtime.state.FunctionSnapshotContext;
 import org.apache.flink.streaming.api.checkpoint.CheckpointedFunction;
-import org.apache.flink.streaming.api.functions.sink.RichSinkFunction;
-import org.apache.flink.streaming.api.functions.sink.SinkFunction;
+import org.apache.flink.streaming.api.functions.sink.legacy.RichSinkFunction;
 import org.apache.flink.streaming.connectors.gcp.pubsub.emulator.EmulatorCredentials;
 import org.apache.flink.streaming.connectors.gcp.pubsub.emulator.EmulatorCredentialsProvider;
 import org.apache.flink.util.Preconditions;
@@ -98,7 +97,7 @@ public class PubSubSink<IN> extends RichSinkFunction<IN> implements Checkpointed
     private transient TransportChannel channel = null;
 
     @Override
-    public void open(Configuration configuration) throws Exception {
+    public void open(OpenContext openContext) throws Exception {
         serializationSchema.open(
                 RuntimeContextInitializationContextAdapters.serializationAdapter(
                         getRuntimeContext(), metricGroup -> metricGroup.addGroup("user")));
@@ -179,7 +178,7 @@ public class PubSubSink<IN> extends RichSinkFunction<IN> implements Checkpointed
     }
 
     @Override
-    public void invoke(IN message, SinkFunction.Context context) {
+    public void invoke(IN message, Context context) throws Exception {
         PubsubMessage pubsubMessage =
                 PubsubMessage.newBuilder()
                         .setData(ByteString.copyFrom(serializationSchema.serialize(message)))

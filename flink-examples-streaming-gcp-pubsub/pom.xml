@@ -24,7 +24,7 @@ under the License.
 	<parent>
 		<groupId>org.apache.flink</groupId>
 		<artifactId>flink-connector-gcp-pubsub-parent</artifactId>
-		<version>3.2-SNAPSHOT</version>
+		<version>3.3.1-2.2</version>
 	</parent>
 
 	<artifactId>flink-examples-streaming-gcp-pubsub</artifactId>
@@ -84,6 +84,8 @@ under the License.
 									<include>org.threeten:*</include>
 									<include>io.grpc:*</include>
 									<include>io.opencensus:*</include>
+									<include>io.netty:*</include>
+									<include>io.perfmark:*</include>
 								</includes>
 							</artifactSet>
 							<relocations>
@@ -101,6 +103,7 @@ under the License.
 									</includes>
 								</filter>
 							</filters>
+
 						</configuration>
 					</execution>
 				</executions>

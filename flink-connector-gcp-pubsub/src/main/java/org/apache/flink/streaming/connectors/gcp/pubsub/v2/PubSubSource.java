@@ -1,0 +1,339 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.apache.flink.streaming.connectors.gcp.pubsub.v2;
+
+import org.apache.flink.api.common.serialization.DeserializationSchema;
+import org.apache.flink.api.common.typeinfo.TypeInformation;
+import org.apache.flink.api.connector.source.Boundedness;
+import org.apache.flink.api.connector.source.Source;
+import org.apache.flink.api.connector.source.SourceReader;
+import org.apache.flink.api.connector.source.SourceReaderContext;
+import org.apache.flink.api.connector.source.SplitEnumerator;
+import org.apache.flink.api.connector.source.SplitEnumeratorContext;
+import org.apache.flink.api.java.typeutils.ResultTypeQueryable;
+import org.apache.flink.configuration.Configuration;
+import org.apache.flink.core.io.SimpleVersionedSerializer;
+import org.apache.flink.metrics.MetricGroup;
+import org.apache.flink.streaming.connectors.gcp.pubsub.proto.PubSubEnumeratorCheckpoint;
+import org.apache.flink.streaming.connectors.gcp.pubsub.v2.internal.source.enumerator.PubSubCheckpointSerializer;
+import org.apache.flink.streaming.connectors.gcp.pubsub.v2.internal.source.enumerator.PubSubSplitEnumerator;
+import org.apache.flink.streaming.connectors.gcp.pubsub.v2.internal.source.reader.AckTracker;
+import org.apache.flink.streaming.connectors.gcp.pubsub.v2.internal.source.reader.PubSubAckTracker;
+import org.apache.flink.streaming.connectors.gcp.pubsub.v2.internal.source.reader.PubSubNotifyingPullSubscriber;
+import org.apache.flink.streaming.connectors.gcp.pubsub.v2.internal.source.reader.PubSubSourceReader;
+import org.apache.flink.streaming.connectors.gcp.pubsub.v2.internal.source.reader.PubSubSplitReader;
+import org.apache.flink.streaming.connectors.gcp.pubsub.v2.internal.source.split.SubscriptionSplit;
+import org.apache.flink.streaming.connectors.gcp.pubsub.v2.internal.source.split.SubscriptionSplitSerializer;
+import org.apache.flink.streaming.connectors.gcp.pubsub.v2.util.EmulatorEndpoint;
+import org.apache.flink.util.Preconditions;
+import org.apache.flink.util.UserCodeClassLoader;
+
+import com.google.api.gax.batching.FlowControlSettings;
+import com.google.api.gax.core.FixedCredentialsProvider;
+import com.google.api.gax.core.NoCredentialsProvider;
+import com.google.api.gax.grpc.GrpcTransportChannel;
+import com.google.api.gax.rpc.FixedHeaderProvider;
+import com.google.api.gax.rpc.FixedTransportChannelProvider;
+import com.google.auth.Credentials;
+import com.google.auto.value.AutoValue;
+import com.google.cloud.pubsub.v1.MessageReceiver;
+import com.google.cloud.pubsub.v1.Subscriber;
+import com.google.cloud.pubsub.v1.SubscriptionAdminSettings;
+import com.google.pubsub.v1.ProjectSubscriptionName;
+import com.google.pubsub.v1.PubsubMessage;
+import io.grpc.ManagedChannelBuilder;
+import org.threeten.bp.Duration;
+
+import javax.annotation.Nullable;
+
+import java.util.Set;
+
+/**
+ * Google Cloud Pub/Sub source to pull messages from a Pub/Sub subscription.
+ *
+ * <p>{@link PubSubSource} is constructed and configured using {@link Builder}. {@link PubSubSource}
+ * cannot be configured after it is built. See {@link Builder} for how {@link PubSubSource} can be
+ * configured.
+ */
+@AutoValue
+public abstract class PubSubSource<OutputT>
+        implements Source<OutputT, SubscriptionSplit, PubSubEnumeratorCheckpoint>,
+                ResultTypeQueryable<OutputT> {
+    public abstract String projectName();
+
+    /**
+     * Returns all subscriptions this source pulls from. Every subscription is treated identically
+     * by the enumerator — each becomes one hash-routed split.
+     */
+    public abstract Set<String> subscriptionNames();
+
+    public abstract PubSubDeserializationSchemaV2<OutputT> deserializationSchema();
+
+    @Nullable
+    public abstract Long maxOutstandingMessagesCount();
+
+    @Nullable
+    public abstract Long maxOutstandingMessagesBytes();
+
+    @Nullable
+    public abstract Integer parallelPullCount();
+
+    @Nullable
+    public abstract Credentials credentials();
+
+    @Nullable
+    public abstract String endpoint();
+
+    public static <OutputT> Builder<OutputT> builder() {
+        return new AutoValue_PubSubSource.Builder<OutputT>();
+    }
+
+    Subscriber createSubscriber(ProjectSubscriptionName subscriptionName, MessageReceiver receiver) {
+        Subscriber.Builder builder = Subscriber.newBuilder(subscriptionName.toString(), receiver);
+        String pkgVersion = getClass().getPackage().getImplementationVersion();
+        // Channel settings copied from com.google.cloud:google-cloud-pubsub:1.124.1.
+        builder.setChannelProvider(
+                SubscriptionAdminSettings.defaultGrpcTransportProviderBuilder()
+                        .setMaxInboundMessageSize(
+                                20 * 1024 * 1024) // 20MB API maximum message size.
+                        .setMaxInboundMetadataSize(
+                                4 * 1024 * 1024) // 4MB API maximum metadata size)
+                        .setKeepAliveTime(Duration.ofMinutes(5))
+                        .setHeaderProvider(
+                                FixedHeaderProvider.create(
+                                        "x-goog-api-client",
+                                        "flink-connector-gcp-pubsub/" + pkgVersion))
+                        .build());
+        builder.setFlowControlSettings(
+                FlowControlSettings.newBuilder()
+                        .setMaxOutstandingElementCount(
+                                maxOutstandingMessagesCount() != null
+                                        ? maxOutstandingMessagesCount()
+                                        : 1000L)
+                        .setMaxOutstandingRequestBytes(
+                                maxOutstandingMessagesBytes() != null
+                                        ? maxOutstandingMessagesBytes()
+                                        : 100L * 1024L * 1024L) // 100MB
+                        .build());
+        if (parallelPullCount() != null) {
+            builder.setParallelPullCount(parallelPullCount());
+        }
+        if (credentials() != null) {
+            builder.setCredentialsProvider(FixedCredentialsProvider.create(credentials()));
+        }
+        if (endpoint() != null) {
+            builder.setEndpoint(endpoint());
+        }
+
+        String emulatorEndpoint = EmulatorEndpoint.getEmulatorEndpoint(endpoint());
+        if (emulatorEndpoint != null) {
+            builder.setCredentialsProvider(NoCredentialsProvider.create());
+            builder.setChannelProvider(
+                    FixedTransportChannelProvider.create(
+                            GrpcTransportChannel.create(
+                                    ManagedChannelBuilder.forTarget(emulatorEndpoint)
+                                            .usePlaintext()
+                                            .build())));
+        }
+        return builder.build();
+    }
+
+    private PubSubSplitReader createSplitReader(
+            AckTracker ackTracker, java.util.function.Function<String, Long> rateLimitLookup) {
+        // The per-split subscriber is built lazily from the split's own subscription. This is what
+        // makes the uniformly-multi-subscription enumerator viable: each split — initial or
+        // dynamically added — connects to its own subscription.
+        return new PubSubSplitReader(
+                (split) ->
+                        new PubSubNotifyingPullSubscriber(
+                                (receiver) -> createSubscriber(split.subscriptionName(), receiver),
+                                ackTracker),
+                rateLimitLookup);
+    }
+
+    @Override
+    public Boundedness getBoundedness() {
+        return Boundedness.CONTINUOUS_UNBOUNDED;
+    }
+
+    @Override
+    public SourceReader<OutputT, SubscriptionSplit> createReader(SourceReaderContext readerContext)
+            throws Exception {
+        PubSubDeserializationSchemaV2<OutputT> schema = deserializationSchema();
+        schema.open(
+                new DeserializationSchema.InitializationContext() {
+                    @Override
+                    public MetricGroup getMetricGroup() {
+                        return readerContext.metricGroup();
+                    }
+
+                    @Override
+                    public UserCodeClassLoader getUserCodeClassLoader() {
+                        return null;
+                    }
+                });
+        return new PubSubSourceReader<>(
+                schema,
+                new PubSubAckTracker(),
+                this::createSplitReader,
+                new Configuration(),
+                readerContext);
+    }
+
+    @Override
+    public SplitEnumerator<SubscriptionSplit, PubSubEnumeratorCheckpoint> createEnumerator(
+            SplitEnumeratorContext<SubscriptionSplit> enumContext) {
+        return new PubSubSplitEnumerator(
+                subscriptionNames(), projectName(), enumContext, /* checkpoint= */ null);
+    }
+
+    @Override
+    public SplitEnumerator<SubscriptionSplit, PubSubEnumeratorCheckpoint> restoreEnumerator(
+            SplitEnumeratorContext<SubscriptionSplit> enumContext,
+            PubSubEnumeratorCheckpoint checkpoint) {
+        return new PubSubSplitEnumerator(
+                subscriptionNames(), projectName(), enumContext, checkpoint);
+    }
+
+    @Override
+    public SimpleVersionedSerializer<SubscriptionSplit> getSplitSerializer() {
+        return new SubscriptionSplitSerializer();
+    }
+
+    @Override
+    public SimpleVersionedSerializer<PubSubEnumeratorCheckpoint>
+            getEnumeratorCheckpointSerializer() {
+        return new PubSubCheckpointSerializer();
+    }
+
+    @Override
+    public TypeInformation<OutputT> getProducedType() {
+        return deserializationSchema().getProducedType();
+    }
+
+    /** Builder to construct {@link PubSubSource}. */
+    @AutoValue.Builder
+    public abstract static class Builder<OutputT> {
+        /**
+         * Sets the GCP project ID that owns the subscriptions from which messages are pulled.
+         *
+         * <p>Setting this option is required to build {@link PubSubSource}.
+         */
+        public abstract Builder<OutputT> setProjectName(String projectName);
+
+        /**
+         * Sets the Pub/Sub subscriptions from which messages are pulled. Every subscription is
+         * treated identically by the enumerator — each becomes one hash-routed split.
+         *
+         * <p>Setting this option (or {@link #setSubscriptionName(String)} as a single-arg
+         * convenience) is required to build {@link PubSubSource}.
+         */
+        public abstract Builder<OutputT> setSubscriptionNames(Set<String> subscriptionNames);
+
+        /**
+         * Single-subscription convenience that delegates to {@link
+         * #setSubscriptionNames(Set)}. Preserved for source-code compatibility with the
+         * pre-multi-subscription API.
+         */
+        public final Builder<OutputT> setSubscriptionName(String subscriptionName) {
+            Preconditions.checkNotNull(subscriptionName, "subscriptionName must not be null");
+            // java.util.Set.of preserves null-hostility; the precondition above is the actual
+            // public API contract.
+            return setSubscriptionNames(java.util.Collections.singleton(subscriptionName));
+        }
+
+        /**
+         * Sets the deserialization schema used to deserialize {@link PubsubMessage} for processing.
+         *
+         * <p>Setting this option is required to build {@link PubSubSource}.
+         */
+        public abstract Builder<OutputT> setDeserializationSchema(
+                PubSubDeserializationSchemaV2<OutputT> deserializationSchema);
+
+        /**
+         * Sets the max number of messages that can be outstanding to a StreamingPull connection.
+         *
+         * <p>Defaults to 1,000 outstanding messages. A message is considered outstanding when it is
+         * delivered and waiting to be acknowledged in the next successful checkpoint. Google Cloud
+         * Pub/Sub suspends message delivery to StreamingPull connections that reach this limit.
+         *
+         * <p>If set, this value must be > 0. Otherwise, calling {@link build} will throw an
+         * exception.
+         */
+        public abstract Builder<OutputT> setMaxOutstandingMessagesCount(Long count);
+
+        /**
+         * Sets the max cumulative message bytes that can be outstanding to a StreamingPull
+         * connection.
+         *
+         * <p>Defaults to 100 MB. A message is considered outstanding when it is delivered and
+         * waiting to be acknowledged in the next successful checkpoint. Google Cloud Pub/Sub
+         * suspends message delivery to StreamingPull connections that reach this limit.
+         *
+         * <p>If set, this value must be > 0. Otherwise, calling {@link build} will throw an
+         * exception.
+         */
+        public abstract Builder<OutputT> setMaxOutstandingMessagesBytes(Long bytes);
+
+        /**
+         * Sets the number of StreamingPull connections opened by each {@link PubSubSource} subtask.
+         *
+         * <p>Defaults to 1.
+         *
+         * <p>If set, this value must be > 0. Otherwise, calling {@link build} will throw an
+         * exception.
+         */
+        public abstract Builder<OutputT> setParallelPullCount(Integer parallelPullCount);
+
+        /**
+         * Sets the credentials used when pulling messages from Google Cloud Pub/Sub.
+         *
+         * <p>If not set, then Application Default Credentials are used for authentication.
+         */
+        public abstract Builder<OutputT> setCredentials(Credentials credentials);
+
+        /**
+         * Sets the Google Cloud Pub/Sub service endpoint from which messages are pulled.
+         *
+         * <p>Defaults to connecting to the global endpoint, which routes requests to the nearest
+         * regional endpoint.
+         */
+        public abstract Builder<OutputT> setEndpoint(String endpoint);
+
+        abstract PubSubSource<OutputT> autoBuild();
+
+        public final PubSubSource<OutputT> build() {
+            PubSubSource<OutputT> source = autoBuild();
+            Preconditions.checkArgument(
+                    !source.subscriptionNames().isEmpty(),
+                    "subscriptionNames must contain at least one subscription.");
+            Preconditions.checkArgument(
+                    source.maxOutstandingMessagesCount() == null
+                            || source.maxOutstandingMessagesCount() > 0,
+                    "maxOutstandingMessagesCount, if set, must be a value greater than 0.");
+            Preconditions.checkArgument(
+                    source.maxOutstandingMessagesBytes() == null
+                            || source.maxOutstandingMessagesBytes() > 0,
+                    "maxOutstandingMessagesBytes, if set, must be a value greater than 0.");
+            Preconditions.checkArgument(
+                    source.parallelPullCount() == null || source.parallelPullCount() > 0,
+                    "parallelPullCount, if set, must be a value greater than 0.");
+            return source;
+        }
+    }
+}

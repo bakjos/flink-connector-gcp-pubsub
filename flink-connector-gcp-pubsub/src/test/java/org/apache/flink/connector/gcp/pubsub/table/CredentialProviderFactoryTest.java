@@ -22,7 +22,6 @@ import com.google.api.gax.core.CredentialsProvider;
 import com.google.api.gax.core.FixedCredentialsProvider;
 import com.google.api.gax.core.GoogleCredentialsProvider;
 import com.google.auth.Credentials;
-import com.google.auth.oauth2.AccessToken;
 import com.google.auth.oauth2.GoogleCredentials;
 import org.junit.jupiter.api.Test;
 
@@ -34,7 +33,6 @@ import java.security.NoSuchAlgorithmException;
 import java.security.PrivateKey;
 import java.security.spec.InvalidKeySpecException;
 import java.security.spec.PKCS8EncodedKeySpec;
-import java.sql.Date;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.HashMap;
@@ -196,11 +194,9 @@ class CredentialProviderFactoryTest {
 
         Credentials credentials = ((FixedCredentialsProvider) credentialsProvider).getCredentials();
         assertThat(credentials).isNotNull();
-        assertThat(credentials)
-                .isEqualTo(
-                        GoogleCredentials.create(
-                                new AccessToken(
-                                        "access-token",
-                                        Date.from(java.time.Instant.ofEpochMilli(123)))));
+        assertThat(credentials).isInstanceOf(GoogleCredentials.class);
+        GoogleCredentials google = (GoogleCredentials) credentials;
+        assertThat(google.getAccessToken().getTokenValue()).isEqualTo("access-token");
+        assertThat(google.getAccessToken().getExpirationTime().getTime()).isEqualTo(123L);
     }
 }
