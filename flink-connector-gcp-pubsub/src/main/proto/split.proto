@@ -34,4 +34,8 @@ message PubSubEnumeratorCheckpoint {
     SubscriptionSplitProto split = 2;
   }
   repeated Assignment assignments = 1;
+  // Subscription names (short, project-relative) that have been assigned by the enumerator.
+  // Used to restore the enumerator's idempotency state across checkpoints so previously-added
+  // subscriptions are not re-routed on restore.
+  repeated string assigned_subscriptions = 2;
 }

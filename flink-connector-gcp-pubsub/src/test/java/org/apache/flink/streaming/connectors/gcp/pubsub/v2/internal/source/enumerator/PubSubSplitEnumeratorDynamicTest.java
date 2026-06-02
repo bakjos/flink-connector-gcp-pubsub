@@ -21,7 +21,6 @@ import org.apache.flink.api.connector.source.SourceEvent;
 import org.apache.flink.api.connector.source.SplitEnumeratorContext;
 import org.apache.flink.api.connector.source.SplitsAssignment;
 import org.apache.flink.streaming.connectors.gcp.pubsub.v2.internal.source.event.RateLimitChangeEvent;
-import org.apache.flink.streaming.connectors.gcp.pubsub.v2.internal.source.event.SubscriberSettingsChangeEvent;
 import org.apache.flink.streaming.connectors.gcp.pubsub.v2.internal.source.split.SubscriptionSplit;
 
 import com.google.pubsub.v1.ProjectSubscriptionName;
@@ -32,7 +31,6 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.MockitoJUnitRunner;
 
-import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -41,23 +39,24 @@ import java.util.Map;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * Tests for the dynamic-subscription extension methods (addSubscriptions, updateRateLimits,
- * updateSubscriberSettings) added in Plan #1 Phase C.
+ * Tests for the dynamic-subscription API on {@link PubSubSplitEnumerator}.
+ *
+ * <p>After the Plan #1 Phase C addendum, every subscription is treated identically — including
+ * subscriptions supplied at construction. The dedicated "skip source-default" behavior is gone, so
+ * those-related tests have been retired.
  */
 @RunWith(MockitoJUnitRunner.class)
 public class PubSubSplitEnumeratorDynamicTest {
 
     private static final String PROJECT = "test-project";
-    private static final ProjectSubscriptionName SOURCE_DEFAULT_SUB =
-            ProjectSubscriptionName.of(PROJECT, "source-default-sub");
 
     @Mock SplitEnumeratorContext<SubscriptionSplit> mockContext;
 
@@ -73,9 +72,13 @@ public class PubSubSplitEnumeratorDynamicTest {
 
     @Before
     public void doBeforeEachTest() {
+        // Start with no initial subscriptions — exercise the dynamic addSubscriptions path.
         enumerator =
                 new PubSubSplitEnumerator(
-                        SOURCE_DEFAULT_SUB, mockContext, new HashMap<Integer, SubscriptionSplit>());
+                        Collections.<String>emptySet(),
+                        PROJECT,
+                        mockContext,
+                        /* checkpoint= */ null);
     }
 
     @Test
@@ -85,11 +88,8 @@ public class PubSubSplitEnumeratorDynamicTest {
 
         enumerator.addReader(0);
         enumerator.addReader(1);
-
-        // Now add dynamic subscriptions.
         enumerator.addSubscriptions(new HashSet<>(java.util.Arrays.asList("sub-b", "sub-c")));
 
-        // Capture every SplitsAssignment call and verify sub-b + sub-c appear.
         ArgumentCaptor<SplitsAssignment<SubscriptionSplit>> captor =
                 ArgumentCaptor.forClass(SplitsAssignment.class);
         verify(mockContext, org.mockito.Mockito.atLeastOnce()).assignSplits(captor.capture());
@@ -108,22 +108,15 @@ public class PubSubSplitEnumeratorDynamicTest {
 
     @Test
     public void addSubscriptionsParksWhenReaderUnregistered() {
-        when(mockContext.registeredReaders()).thenReturn(Collections.emptyMap());
+        // Sequenced stub: first call returns empty (parking happens), subsequent calls return
+        // both readers so addReader can flush the parked split.
+        when(mockContext.registeredReaders())
+                .thenReturn(Collections.emptyMap())
+                .thenReturn(registeredReaders(0, 1));
         when(mockContext.currentParallelism()).thenReturn(2);
 
-        // No readers registered.
         enumerator.addSubscriptions(Collections.singleton("sub-x"));
-
-        // No assignment should have happened.
         verify(mockContext, never()).assignSplits(any());
-
-        // Compute the reader the hash routes sub-x to and register that reader.
-        SubscriptionSplit probeSplit =
-                SubscriptionSplit.create(ProjectSubscriptionName.of(PROJECT, "sub-x"));
-        // The enumerator created a different split with its own random uid, so we cannot
-        // recompute the exact target subtask externally. Instead, register ALL possible
-        // subtasks and assert that at least one assignSplits call delivers sub-x.
-        when(mockContext.registeredReaders()).thenReturn(registeredReaders(0, 1));
 
         enumerator.addReader(0);
         enumerator.addReader(1);
@@ -153,23 +146,31 @@ public class PubSubSplitEnumeratorDynamicTest {
         enumerator.addReader(0);
         enumerator.addSubscriptions(Collections.singleton("sub-y"));
         int afterFirstAdd = enumerator.getAssignedSubscriptions().size();
-        enumerator.addSubscriptions(Collections.singleton("sub-y")); // duplicate
+        enumerator.addSubscriptions(Collections.singleton("sub-y"));
         int afterSecondAdd = enumerator.getAssignedSubscriptions().size();
         assertThat(afterSecondAdd).isEqualTo(afterFirstAdd);
         assertThat(enumerator.getAssignedSubscriptions()).contains("sub-y");
     }
 
     @Test
-    public void addSubscriptionsSkipsSourceDefault() {
-        org.mockito.Mockito.lenient()
-                .when(mockContext.registeredReaders())
-                .thenReturn(registeredReaders(0));
-        org.mockito.Mockito.lenient().when(mockContext.currentParallelism()).thenReturn(1);
+    public void addSubscriptionsTreatsAllSubscriptionsUniformly() {
+        // Build an enumerator whose initial-subscription set carries "shared". After start(),
+        // calling addSubscriptions("shared") again must be a no-op — proving the uniform-routing
+        // model still de-duplicates against the initial set.
+        PubSubSplitEnumerator e =
+                new PubSubSplitEnumerator(
+                        Collections.singleton("shared"),
+                        PROJECT,
+                        mockContext,
+                        /* checkpoint= */ null);
+        when(mockContext.registeredReaders()).thenReturn(registeredReaders(0));
+        when(mockContext.currentParallelism()).thenReturn(1);
 
-        enumerator.addSubscriptions(Collections.singleton(SOURCE_DEFAULT_SUB.getSubscription()));
-
-        assertThat(enumerator.getAssignedSubscriptions())
-                .doesNotContain(SOURCE_DEFAULT_SUB.getSubscription());
+        e.start();
+        int afterStart = e.getAssignedSubscriptions().size();
+        e.addSubscriptions(Collections.singleton("shared"));
+        assertThat(e.getAssignedSubscriptions().size()).isEqualTo(afterStart);
+        assertThat(e.getAssignedSubscriptions()).contains("shared");
     }
 
     @Test
@@ -192,21 +193,6 @@ public class PubSubSplitEnumeratorDynamicTest {
     }
 
     @Test
-    public void updateSubscriberSettingsBroadcastsEvent() {
-        when(mockContext.registeredReaders()).thenReturn(registeredReaders(0));
-
-        enumerator.updateSubscriberSettings(30, 5);
-
-        ArgumentCaptor<SourceEvent> evCaptor = ArgumentCaptor.forClass(SourceEvent.class);
-        verify(mockContext, times(1)).sendEventToSourceReader(anyInt(), evCaptor.capture());
-        SourceEvent ev = evCaptor.getValue();
-        assertThat(ev).isInstanceOf(SubscriberSettingsChangeEvent.class);
-        SubscriberSettingsChangeEvent ss = (SubscriberSettingsChangeEvent) ev;
-        assertThat(ss.requestTimeoutSec()).isEqualTo(30);
-        assertThat(ss.requestRetries()).isEqualTo(5);
-    }
-
-    @Test
     public void addSubscriptionsTracksAssignedForSnapshotState() {
         when(mockContext.registeredReaders()).thenReturn(registeredReaders(0));
         when(mockContext.currentParallelism()).thenReturn(1);
@@ -214,10 +200,32 @@ public class PubSubSplitEnumeratorDynamicTest {
         enumerator.addReader(0);
         enumerator.addSubscriptions(Collections.singleton("sub-b"));
 
-        // The enumerator's internal "assignedSubscriptions" tracks dynamic additions for
-        // observability — snapshotState itself serializes per-reader splits including the
-        // dynamically-added ones (which we already verified are assigned in
-        // addSubscriptionsAssignsToRegisteredReaders).
         assertThat(enumerator.getAssignedSubscriptions()).containsExactly("sub-b");
+    }
+
+    @Test
+    public void addSubscriptionsIgnoresProjectSubscriptionNameNamespacing() {
+        // sanity-check the ProjectSubscriptionName.of(projectName, subName) round-trip.
+        when(mockContext.registeredReaders()).thenReturn(registeredReaders(0));
+        when(mockContext.currentParallelism()).thenReturn(1);
+
+        enumerator.addReader(0);
+        enumerator.addSubscriptions(Collections.singleton("ns-sub"));
+
+        ArgumentCaptor<SplitsAssignment<SubscriptionSplit>> captor =
+                ArgumentCaptor.forClass(SplitsAssignment.class);
+        verify(mockContext, org.mockito.Mockito.atLeastOnce()).assignSplits(captor.capture());
+        boolean ok = false;
+        for (SplitsAssignment<SubscriptionSplit> sa : captor.getAllValues()) {
+            for (List<SubscriptionSplit> splits : sa.assignment().values()) {
+                for (SubscriptionSplit s : splits) {
+                    ProjectSubscriptionName psn = s.subscriptionName();
+                    if (PROJECT.equals(psn.getProject()) && "ns-sub".equals(psn.getSubscription())) {
+                        ok = true;
+                    }
+                }
+            }
+        }
+        assertThat(ok).isTrue();
     }
 }

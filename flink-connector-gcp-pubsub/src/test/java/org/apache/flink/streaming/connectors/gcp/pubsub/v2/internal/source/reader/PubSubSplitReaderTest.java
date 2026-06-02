@@ -39,7 +39,7 @@ import java.io.IOException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
-import java.util.function.Supplier;
+import java.util.function.Function;
 
 import static com.google.common.truth.Truth.assertThat;
 import static org.junit.Assert.assertThrows;
@@ -52,7 +52,7 @@ import static org.mockito.Mockito.when;
 @RunWith(MockitoJUnitRunner.class)
 public class PubSubSplitReaderTest {
 
-    @Mock Supplier<NotifyingPullSubscriber> mockFactory;
+    @Mock Function<SubscriptionSplit, NotifyingPullSubscriber> mockFactory;
 
     @Mock NotifyingPullSubscriber mockSubscriber1;
 
@@ -63,7 +63,9 @@ public class PubSubSplitReaderTest {
     @Before
     public void doBeforeEachTest() {
         reader = new PubSubSplitReader(mockFactory);
-        when(mockFactory.get()).thenReturn(mockSubscriber1).thenReturn(mockSubscriber2);
+        when(mockFactory.apply(org.mockito.ArgumentMatchers.any(SubscriptionSplit.class)))
+                .thenReturn(mockSubscriber1)
+                .thenReturn(mockSubscriber2);
     }
 
     private static SubscriptionSplit createSplit() {
@@ -93,7 +95,8 @@ public class PubSubSplitReaderTest {
 
     @Test
     public void subscriberCreateFails_propagatesError() throws Throwable {
-        when(mockFactory.get()).thenThrow(new RuntimeException());
+        when(mockFactory.apply(org.mockito.ArgumentMatchers.any(SubscriptionSplit.class)))
+                .thenThrow(new RuntimeException());
 
         assertThrows(
                 RuntimeException.class,
@@ -246,11 +249,75 @@ public class PubSubSplitReaderTest {
         SubscriptionSplit split1 = createSplit();
         reader.handleSplitsChanges(new SplitsAddition<>(ImmutableList.of(split1)));
         reader.handleSplitsChanges(new SplitsAddition<>(ImmutableList.of(split1)));
-        verify(mockFactory, times(1)).get();
+        verify(mockFactory, times(1))
+                .apply(org.mockito.ArgumentMatchers.any(SubscriptionSplit.class));
     }
 
     @Test
     public void unknownSplitChange_throwsError() {
         assertThrows(IllegalArgumentException.class, () -> reader.handleSplitsChanges(null));
+    }
+
+    @Test
+    public void fetch_appliesRateLimitFromLookup() throws Throwable {
+        // Wire a rate-limit lookup that returns 1 msg/sec for split1, null for others. With the
+        // first fetch starting at t=0, the second fetch should request a ~1s sleep before
+        // proceeding. Use a fake sleep + time source to assert without actually waiting.
+        long[] currentNanos = {0L};
+        long[] requestedSleep = {0L};
+        PubSubSplitReader r =
+                new PubSubSplitReader(
+                        mockFactory,
+                        (splitId) -> 1L,
+                        nanos -> {
+                            requestedSleep[0] = nanos;
+                            currentNanos[0] += nanos;
+                        },
+                        () -> currentNanos[0]);
+
+        SubscriptionSplit split1 = createSplit();
+        when(mockFactory.apply(org.mockito.ArgumentMatchers.any(SubscriptionSplit.class)))
+                .thenReturn(mockSubscriber1);
+        when(mockSubscriber1.notifyDataAvailable()).thenReturn(ApiFutures.immediateFuture(null));
+        when(mockSubscriber1.pullMessage()).thenReturn(Optional.absent());
+        r.handleSplitsChanges(new SplitsAddition<>(ImmutableList.of(split1)));
+
+        // First fetch records lastFetchNanos; no sleep yet (no prior fetch to throttle against).
+        r.fetch();
+        assertThat(requestedSleep[0]).isEqualTo(0L);
+
+        // Immediately fetch again — the throttle should ask for ~1e9 nanos sleep.
+        long beforeSecondFetch = currentNanos[0];
+        r.fetch();
+        // The throttle sleeps just enough so the elapsed-since-last-fetch reaches 1 second.
+        // Allow a 1ms slack so we don't depend on integer-arithmetic exactness.
+        assertThat(requestedSleep[0]).isGreaterThan(990_000_000L);
+        assertThat(currentNanos[0]).isAtLeast(beforeSecondFetch);
+    }
+
+    @Test
+    public void fetch_skipsThrottleWhenRateLimitNull() throws Throwable {
+        long[] currentNanos = {0L};
+        long[] requestedSleep = {0L};
+        PubSubSplitReader r =
+                new PubSubSplitReader(
+                        mockFactory,
+                        (splitId) -> null,
+                        nanos -> {
+                            requestedSleep[0] = nanos;
+                            currentNanos[0] += nanos;
+                        },
+                        () -> currentNanos[0]);
+
+        SubscriptionSplit split1 = createSplit();
+        when(mockFactory.apply(org.mockito.ArgumentMatchers.any(SubscriptionSplit.class)))
+                .thenReturn(mockSubscriber1);
+        when(mockSubscriber1.notifyDataAvailable()).thenReturn(ApiFutures.immediateFuture(null));
+        when(mockSubscriber1.pullMessage()).thenReturn(Optional.absent());
+        r.handleSplitsChanges(new SplitsAddition<>(ImmutableList.of(split1)));
+
+        r.fetch();
+        r.fetch();
+        assertThat(requestedSleep[0]).isEqualTo(0L);
     }
 }

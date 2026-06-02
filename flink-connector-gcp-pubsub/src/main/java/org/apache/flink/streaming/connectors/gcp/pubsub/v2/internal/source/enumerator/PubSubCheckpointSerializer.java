@@ -21,11 +21,20 @@ import org.apache.flink.streaming.connectors.gcp.pubsub.proto.PubSubEnumeratorCh
 
 import java.io.IOException;
 
+/**
+ * Versioned serializer for {@link PubSubEnumeratorCheckpoint}.
+ *
+ * <p>Version 1 (current): the proto now carries an {@code assigned_subscriptions} repeated field
+ * (Plan #1 Phase C addendum). Older v0 checkpoints, which did not populate this field, deserialize
+ * cleanly under v1 thanks to proto3's forward-compat semantics: missing repeated fields decode as
+ * empty lists, and the enumerator constructor backfills {@code assignedSubscriptions} from each
+ * restored split's subscription name. So no explicit migration branch is required.
+ */
 public class PubSubCheckpointSerializer
         implements SimpleVersionedSerializer<PubSubEnumeratorCheckpoint> {
     @Override
     public int getVersion() {
-        return 0;
+        return 1;
     }
 
     @Override
@@ -34,7 +43,7 @@ public class PubSubCheckpointSerializer
     }
 
     @Override
-    public PubSubEnumeratorCheckpoint deserialize(int i, byte[] bytes) throws IOException {
+    public PubSubEnumeratorCheckpoint deserialize(int version, byte[] bytes) throws IOException {
         return PubSubEnumeratorCheckpoint.parseFrom(bytes);
     }
 }

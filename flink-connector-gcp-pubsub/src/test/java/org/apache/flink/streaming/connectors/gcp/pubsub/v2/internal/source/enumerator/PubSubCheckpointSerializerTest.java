@@ -23,10 +23,12 @@ import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 import static com.google.common.truth.Truth.assertThat;
 
+/** Tests for {@link PubSubCheckpointSerializer}. */
 @RunWith(JUnit4.class)
 public final class PubSubCheckpointSerializerTest {
 
@@ -35,9 +37,13 @@ public final class PubSubCheckpointSerializerTest {
         List<PubSubEnumeratorCheckpoint.Assignment> assignments = new ArrayList<>();
         assignments.add(PubSubEnumeratorCheckpoint.Assignment.newBuilder().setSubtask(1).build());
         PubSubEnumeratorCheckpoint proto =
-                PubSubEnumeratorCheckpoint.newBuilder().addAllAssignments(assignments).build();
+                PubSubEnumeratorCheckpoint.newBuilder()
+                        .addAllAssignments(assignments)
+                        .addAllAssignedSubscriptions(Arrays.asList("sub-a", "sub-b"))
+                        .build();
         PubSubCheckpointSerializer serializer = new PubSubCheckpointSerializer();
         assertThat(serializer.deserialize(serializer.getVersion(), serializer.serialize(proto)))
                 .isEqualTo(proto);
+        assertThat(serializer.getVersion()).isEqualTo(1);
     }
 }

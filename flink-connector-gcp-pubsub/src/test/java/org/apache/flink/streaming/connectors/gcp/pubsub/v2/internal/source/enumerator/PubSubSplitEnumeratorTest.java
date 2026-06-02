@@ -26,66 +26,48 @@ import com.google.pubsub.v1.ProjectSubscriptionName;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
-import org.mockito.ArgumentMatcher;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.MockitoJUnitRunner;
 
-import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-import static com.google.common.truth.Truth.assertThat;
-import static org.mockito.ArgumentMatchers.argThat;
-import static org.mockito.Mockito.times;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Tests for {@link PubSubSplitEnumerator} after the uniform-multi-subscription refactor
+ * (Plan #1 Phase C addendum). Every subscription — initial or dynamically added — produces one
+ * hash-routed split, so the original PR #32 "every reader gets a split for the source's
+ * subscription" semantics no longer exist; tests cover the new uniform-routing behavior.
+ */
 @RunWith(MockitoJUnitRunner.class)
 public class PubSubSplitEnumeratorTest {
-    private static final ProjectSubscriptionName SUBSCRIPTION_NAME =
-            ProjectSubscriptionName.of("project", "subscription");
+    private static final String PROJECT = "project";
+    private static final String SUBSCRIPTION = "subscription";
 
     @Mock SplitEnumeratorContext<SubscriptionSplit> mockContext;
 
     PubSubSplitEnumerator splitEnumerator;
 
-    private class SplitsAssignmentMatcher implements ArgumentMatcher<SplitsAssignment> {
-        Set<Integer> expectedReaders;
-
-        public SplitsAssignmentMatcher(List<Integer> expectedReaders) {
-            this.expectedReaders = new HashSet<>(expectedReaders);
-        }
-
-        @Override
-        public boolean matches(SplitsAssignment assignment) {
-            Map<Integer, List<SubscriptionSplit>> assignments = assignment.assignment();
-            if (assignments.size() != expectedReaders.size()) {
-                return false;
-            }
-            for (Map.Entry<Integer, List<SubscriptionSplit>> entry : assignments.entrySet()) {
-                List<SubscriptionSplit> splits = entry.getValue();
-                if (!expectedReaders.contains(entry.getKey())
-                        || splits.size() != 1
-                        || !splits.get(0)
-                                .subscriptionName()
-                                .toString()
-                                .equals(SUBSCRIPTION_NAME.toString())) {
-                    return false;
-                }
-            }
-            return true;
-        }
-    }
-
     @Before
     public void doBeforeEachTest() {
         splitEnumerator =
                 new PubSubSplitEnumerator(
-                        SUBSCRIPTION_NAME, mockContext, new HashMap<Integer, SubscriptionSplit>());
+                        Collections.singleton(SUBSCRIPTION),
+                        PROJECT,
+                        mockContext,
+                        /* checkpoint= */ null);
     }
 
     private Map<Integer, ReaderInfo> createRegisteredReaders(List<Integer> readers) {
@@ -96,78 +78,114 @@ public class PubSubSplitEnumeratorTest {
         return registeredReaders;
     }
 
-    private List<Integer> readersFromCheckpoint(PubSubEnumeratorCheckpoint checkpoint) {
-        List<Integer> readers = new ArrayList<>();
-        checkpoint.getAssignmentsList().forEach(assignment -> readers.add(assignment.getSubtask()));
-        return readers;
+    private Set<String> assignedSubscriptionsFromCalls() {
+        ArgumentCaptor<SplitsAssignment<SubscriptionSplit>> captor =
+                ArgumentCaptor.forClass(SplitsAssignment.class);
+        verify(mockContext, atLeastOnce()).assignSplits(captor.capture());
+        Set<String> seen = new HashSet<>();
+        for (SplitsAssignment<SubscriptionSplit> sa : captor.getAllValues()) {
+            for (List<SubscriptionSplit> splits : sa.assignment().values()) {
+                for (SubscriptionSplit s : splits) {
+                    seen.add(s.subscriptionName().getSubscription());
+                }
+            }
+        }
+        return seen;
     }
 
     @Test
-    public void addReader_generatesNewAssignment() throws Throwable {
-        when(mockContext.registeredReaders()).thenReturn(createRegisteredReaders(Arrays.asList(0)));
+    public void start_assignsInitialSubscriptionToHashRoutedReader() {
+        // Register both readers so wherever the hash routes, an assignment will fire.
+        when(mockContext.registeredReaders()).thenReturn(createRegisteredReaders(Arrays.asList(0, 1)));
+        when(mockContext.currentParallelism()).thenReturn(2);
 
-        splitEnumerator.addReader(0);
-        verify(mockContext).registeredReaders();
-        verify(mockContext).assignSplits(argThat(new SplitsAssignmentMatcher(Arrays.asList(0))));
+        splitEnumerator.start();
 
-        assertThat(readersFromCheckpoint(splitEnumerator.snapshotState(0L)))
-                .isEqualTo(Arrays.asList(0));
+        // Exactly one reader receives a split for the initial subscription.
+        assertThat(assignedSubscriptionsFromCalls()).containsExactly(SUBSCRIPTION);
     }
 
     @Test
-    public void multipleReaders_multipleAssignments() throws Throwable {
+    public void addReader_flushesPendingSplitsForThatReader() {
+        // Reader is not yet registered when start() routes the split — the split parks.
+        // Sequenced stub: first call returns empty (parking), subsequent calls return both readers.
         when(mockContext.registeredReaders())
-                .thenReturn(createRegisteredReaders(Arrays.asList(0)))
+                .thenReturn(Collections.emptyMap())
                 .thenReturn(createRegisteredReaders(Arrays.asList(0, 1)));
+        when(mockContext.currentParallelism()).thenReturn(2);
+        splitEnumerator.start();
+        verify(mockContext, never()).assignSplits(any());
 
+        // Now register both readers; whichever the hash points at receives the parked split.
         splitEnumerator.addReader(0);
         splitEnumerator.addReader(1);
-        verify(mockContext, times(2)).registeredReaders();
-        verify(mockContext).assignSplits(argThat(new SplitsAssignmentMatcher(Arrays.asList(0))));
-        verify(mockContext).assignSplits(argThat(new SplitsAssignmentMatcher(Arrays.asList(1))));
 
-        assertThat(readersFromCheckpoint(splitEnumerator.snapshotState(0L)))
-                .isEqualTo(Arrays.asList(0, 1));
+        assertThat(assignedSubscriptionsFromCalls()).contains(SUBSCRIPTION);
     }
 
     @Test
-    public void sameReader_noNewAssignment() throws Throwable {
+    public void start_isIdempotentAcrossRepeatedAddSubscriptions() {
         when(mockContext.registeredReaders()).thenReturn(createRegisteredReaders(Arrays.asList(0)));
+        when(mockContext.currentParallelism()).thenReturn(1);
 
-        splitEnumerator.addReader(0);
-        splitEnumerator.addReader(0);
-        verify(mockContext, times(2)).registeredReaders();
-        verify(mockContext).assignSplits(argThat(new SplitsAssignmentMatcher(Arrays.asList(0))));
+        splitEnumerator.start();
+        // Re-adding the same initial subscription should be a no-op.
+        splitEnumerator.addSubscriptions(Collections.singleton(SUBSCRIPTION));
 
-        assertThat(readersFromCheckpoint(splitEnumerator.snapshotState(0L)))
-                .isEqualTo(Arrays.asList(0));
+        // Only one assignment was made for the subscription.
+        ArgumentCaptor<SplitsAssignment<SubscriptionSplit>> captor =
+                ArgumentCaptor.forClass(SplitsAssignment.class);
+        verify(mockContext, atLeastOnce()).assignSplits(captor.capture());
+        int splitCount = 0;
+        for (SplitsAssignment<SubscriptionSplit> sa : captor.getAllValues()) {
+            for (List<SubscriptionSplit> splits : sa.assignment().values()) {
+                splitCount += splits.size();
+            }
+        }
+        assertThat(splitCount).isEqualTo(1);
     }
 
     @Test
-    public void addSplitsBack_removesReader() throws Throwable {
-        when(mockContext.registeredReaders())
-                .thenReturn(createRegisteredReaders(Arrays.asList(0)))
-                .thenReturn(createRegisteredReaders(new ArrayList<>()));
-
-        splitEnumerator.addReader(0);
-        splitEnumerator.addSplitsBack(new ArrayList<>(), 0);
-        verify(mockContext, times(2)).registeredReaders();
-        verify(mockContext).assignSplits(argThat(new SplitsAssignmentMatcher(Arrays.asList(0))));
-
-        assertThat(readersFromCheckpoint(splitEnumerator.snapshotState(0L))).isEmpty();
-    }
-
-    @Test
-    public void addSplitsBack_readerRecovers() throws Throwable {
+    public void addSplitsBack_rereoutesSplits() {
         when(mockContext.registeredReaders()).thenReturn(createRegisteredReaders(Arrays.asList(0)));
+        when(mockContext.currentParallelism()).thenReturn(1);
+        splitEnumerator.start();
 
-        splitEnumerator.addReader(0);
-        splitEnumerator.addSplitsBack(new ArrayList<>(), 0);
-        verify(mockContext, times(2)).registeredReaders();
-        verify(mockContext, times(2))
-                .assignSplits(argThat(new SplitsAssignmentMatcher(Arrays.asList(0))));
+        // Pretend reader 0 returned its split.
+        SubscriptionSplit returned =
+                SubscriptionSplit.create(ProjectSubscriptionName.of(PROJECT, "other-sub"));
+        splitEnumerator.addSplitsBack(Collections.singletonList(returned), 0);
 
-        assertThat(readersFromCheckpoint(splitEnumerator.snapshotState(0L)))
-                .isEqualTo(Arrays.asList(0));
+        // The returned split should be rerouted to a registered reader (reader 0, the only one).
+        assertThat(assignedSubscriptionsFromCalls()).contains("other-sub");
+    }
+
+    @Test
+    public void snapshotState_recordsAssignedSubscriptions() {
+        when(mockContext.registeredReaders()).thenReturn(createRegisteredReaders(Arrays.asList(0)));
+        when(mockContext.currentParallelism()).thenReturn(1);
+        splitEnumerator.start();
+
+        PubSubEnumeratorCheckpoint checkpoint = splitEnumerator.snapshotState(0L);
+        assertThat(checkpoint.getAssignedSubscriptionsList()).contains(SUBSCRIPTION);
+        assertThat(checkpoint.getAssignmentsList()).isNotEmpty();
+    }
+
+    @Test
+    public void restoreFromCheckpoint_skipsAlreadyAssignedSubscriptions() {
+        when(mockContext.registeredReaders()).thenReturn(createRegisteredReaders(Arrays.asList(0)));
+        when(mockContext.currentParallelism()).thenReturn(1);
+        splitEnumerator.start();
+        PubSubEnumeratorCheckpoint checkpoint = splitEnumerator.snapshotState(0L);
+
+        // Build a new enumerator restored from the checkpoint with the same initial subscriptions.
+        SplitEnumeratorContext<SubscriptionSplit> ctx2 = mockContext;
+        PubSubSplitEnumerator restored =
+                new PubSubSplitEnumerator(
+                        Collections.singleton(SUBSCRIPTION), PROJECT, ctx2, checkpoint);
+        restored.start();
+
+        // The restored enumerator should not duplicate the initial subscription.
+        assertThat(restored.getAssignedSubscriptions()).containsExactly(SUBSCRIPTION);
     }
 }

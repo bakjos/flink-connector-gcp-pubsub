@@ -63,9 +63,8 @@ public class PubSubSourceReaderTest {
                 new PubSubSourceReader<>(
                         PubSubDeserializationSchemaV2.dataOnly(new SimpleStringSchema()),
                         mockAckTracker,
-                        (ackTracker) -> {
-                            return mockSplitReader;
-                        },
+                        (PubSubSourceReader.LegacySplitReaderFactory)
+                                (ackTracker) -> mockSplitReader,
                         new Configuration(),
                         mockContext);
     }

@@ -22,7 +22,6 @@ import org.apache.flink.configuration.Configuration;
 import org.apache.flink.connector.base.source.reader.splitreader.SplitReader;
 import org.apache.flink.streaming.connectors.gcp.pubsub.v2.PubSubDeserializationSchemaV2;
 import org.apache.flink.streaming.connectors.gcp.pubsub.v2.internal.source.event.RateLimitChangeEvent;
-import org.apache.flink.streaming.connectors.gcp.pubsub.v2.internal.source.event.SubscriberSettingsChangeEvent;
 import org.apache.flink.streaming.connectors.gcp.pubsub.v2.internal.source.split.SubscriptionSplit;
 
 import com.google.pubsub.v1.PubsubMessage;
@@ -41,7 +40,7 @@ import static org.mockito.Answers.RETURNS_DEEP_STUBS;
 
 /**
  * Tests for {@link PubSubSourceReader#handleSourceEvents(org.apache.flink.api.connector.source.SourceEvent)}
- * — covers rate-limit and subscriber-settings change handling added in Plan #1 Phase C.
+ * — covers rate-limit change handling added in Plan #1 Phase C and updated in the addendum.
  */
 @RunWith(MockitoJUnitRunner.class)
 public class PubSubSourceReaderEventTest {
@@ -61,7 +60,8 @@ public class PubSubSourceReaderEventTest {
                 new PubSubSourceReader<>(
                         PubSubDeserializationSchemaV2.dataOnly(new SimpleStringSchema()),
                         mockAckTracker,
-                        (ackTracker) -> mockSplitReader,
+                        (PubSubSourceReader.LegacySplitReaderFactory)
+                                (ackTracker) -> mockSplitReader,
                         new Configuration(),
                         mockContext);
     }
@@ -73,7 +73,6 @@ public class PubSubSourceReaderEventTest {
         reader.handleSourceEvents(new RateLimitChangeEvent(200L, overrides));
 
         assertThat(reader.effectiveRateLimit("sub-a")).isEqualTo(500L);
-        // Falls back to source-level default for unmapped splits.
         assertThat(reader.effectiveRateLimit("sub-b")).isEqualTo(200L);
     }
 
@@ -84,7 +83,6 @@ public class PubSubSourceReaderEventTest {
         reader.handleSourceEvents(new RateLimitChangeEvent(100L, overrides));
         assertThat(reader.effectiveRateLimit("sub-a")).isEqualTo(500L);
 
-        // Clear sub-a override by sending a null value for it.
         Map<String, Long> clearing = new HashMap<>();
         clearing.put("sub-a", null);
         reader.handleSourceEvents(new RateLimitChangeEvent(null, clearing));
@@ -96,23 +94,11 @@ public class PubSubSourceReaderEventTest {
         reader.handleSourceEvents(new RateLimitChangeEvent(50L, Collections.emptyMap()));
         assertThat(reader.effectiveRateLimit("anything")).isEqualTo(50L);
 
-        // null default means "unchanged" — the previously-set 50L should still apply.
         Map<String, Long> overrides = new HashMap<>();
         overrides.put("sub-x", 999L);
         reader.handleSourceEvents(new RateLimitChangeEvent(null, overrides));
         assertThat(reader.effectiveRateLimit("anything")).isEqualTo(50L);
         assertThat(reader.effectiveRateLimit("sub-x")).isEqualTo(999L);
-    }
-
-    @Test
-    public void subscriberSettingsChangeIsHandledWithoutError() {
-        // PR-#32 reader doesn't currently rebuild subscribers; the handler logs and returns.
-        // We just assert it doesn't throw and doesn't disrupt subsequent rate-limit handling.
-        reader.handleSourceEvents(new SubscriberSettingsChangeEvent(30, 5));
-
-        // Subsequent rate-limit event should still apply.
-        reader.handleSourceEvents(new RateLimitChangeEvent(123L, Collections.emptyMap()));
-        assertThat(reader.effectiveRateLimit("anything")).isEqualTo(123L);
     }
 
     @Test

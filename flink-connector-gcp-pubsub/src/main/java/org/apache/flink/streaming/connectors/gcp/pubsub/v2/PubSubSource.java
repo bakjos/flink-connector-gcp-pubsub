@@ -59,7 +59,7 @@ import com.google.pubsub.v1.PubsubMessage;
 import io.grpc.ManagedChannelBuilder;
 import org.threeten.bp.Duration;
 
-import java.util.HashMap;
+import java.util.Set;
 
 /**
  * Google Cloud Pub/Sub source to pull messages from a Pub/Sub subscription.
@@ -74,7 +74,11 @@ public abstract class PubSubSource<OutputT>
                 ResultTypeQueryable<OutputT> {
     public abstract String projectName();
 
-    public abstract String subscriptionName();
+    /**
+     * Returns all subscriptions this source pulls from. Every subscription is treated identically
+     * by the enumerator — each becomes one hash-routed split.
+     */
+    public abstract Set<String> subscriptionNames();
 
     public abstract PubSubDeserializationSchemaV2<OutputT> deserializationSchema();
 
@@ -92,11 +96,8 @@ public abstract class PubSubSource<OutputT>
         return new AutoValue_PubSubSource.Builder<OutputT>();
     }
 
-    Subscriber createSubscriber(MessageReceiver receiver) {
-        Subscriber.Builder builder =
-                Subscriber.newBuilder(
-                        ProjectSubscriptionName.of(projectName(), subscriptionName()).toString(),
-                        receiver);
+    Subscriber createSubscriber(ProjectSubscriptionName subscriptionName, MessageReceiver receiver) {
+        Subscriber.Builder builder = Subscriber.newBuilder(subscriptionName.toString(), receiver);
         String pkgVersion = getClass().getPackage().getImplementationVersion();
         // Channel settings copied from com.google.cloud:google-cloud-pubsub:1.124.1.
         builder.setChannelProvider(
@@ -140,9 +141,17 @@ public abstract class PubSubSource<OutputT>
         return builder.build();
     }
 
-    private PubSubSplitReader createSplitReader(AckTracker ackTracker) {
+    private PubSubSplitReader createSplitReader(
+            AckTracker ackTracker, java.util.function.Function<String, Long> rateLimitLookup) {
+        // The per-split subscriber is built lazily from the split's own subscription. This is what
+        // makes the uniformly-multi-subscription enumerator viable: each split — initial or
+        // dynamically added — connects to its own subscription.
         return new PubSubSplitReader(
-                () -> new PubSubNotifyingPullSubscriber(this::createSubscriber, ackTracker));
+                (split) ->
+                        new PubSubNotifyingPullSubscriber(
+                                (receiver) -> createSubscriber(split.subscriptionName(), receiver),
+                                ackTracker),
+                rateLimitLookup);
     }
 
     @Override
@@ -178,24 +187,15 @@ public abstract class PubSubSource<OutputT>
     public SplitEnumerator<SubscriptionSplit, PubSubEnumeratorCheckpoint> createEnumerator(
             SplitEnumeratorContext<SubscriptionSplit> enumContext) {
         return new PubSubSplitEnumerator(
-                ProjectSubscriptionName.of(projectName(), subscriptionName()),
-                enumContext,
-                new HashMap<Integer, SubscriptionSplit>());
+                subscriptionNames(), projectName(), enumContext, /* checkpoint= */ null);
     }
 
     @Override
     public SplitEnumerator<SubscriptionSplit, PubSubEnumeratorCheckpoint> restoreEnumerator(
             SplitEnumeratorContext<SubscriptionSplit> enumContext,
             PubSubEnumeratorCheckpoint checkpoint) {
-        HashMap<Integer, SubscriptionSplit> assignments = new HashMap<>();
-        for (PubSubEnumeratorCheckpoint.Assignment assignment : checkpoint.getAssignmentsList()) {
-            assignments.put(
-                    assignment.getSubtask(), SubscriptionSplit.fromProto(assignment.getSplit()));
-        }
         return new PubSubSplitEnumerator(
-                ProjectSubscriptionName.of(projectName(), subscriptionName()),
-                enumContext,
-                assignments);
+                subscriptionNames(), projectName(), enumContext, checkpoint);
     }
 
     @Override
@@ -218,18 +218,32 @@ public abstract class PubSubSource<OutputT>
     @AutoValue.Builder
     public abstract static class Builder<OutputT> {
         /**
-         * Sets the GCP project ID that owns the subscription from which messages are pulled.
+         * Sets the GCP project ID that owns the subscriptions from which messages are pulled.
          *
          * <p>Setting this option is required to build {@link PubSubSource}.
          */
         public abstract Builder<OutputT> setProjectName(String projectName);
 
         /**
-         * Sets the Pub/Sub subscription to which messages are pulled.
+         * Sets the Pub/Sub subscriptions from which messages are pulled. Every subscription is
+         * treated identically by the enumerator — each becomes one hash-routed split.
          *
-         * <p>Setting this option is required to build {@link PubSubSource}.
+         * <p>Setting this option (or {@link #setSubscriptionName(String)} as a single-arg
+         * convenience) is required to build {@link PubSubSource}.
          */
-        public abstract Builder<OutputT> setSubscriptionName(String subscriptionName);
+        public abstract Builder<OutputT> setSubscriptionNames(Set<String> subscriptionNames);
+
+        /**
+         * Single-subscription convenience that delegates to {@link
+         * #setSubscriptionNames(Set)}. Preserved for source-code compatibility with the
+         * pre-multi-subscription API.
+         */
+        public final Builder<OutputT> setSubscriptionName(String subscriptionName) {
+            Preconditions.checkNotNull(subscriptionName, "subscriptionName must not be null");
+            // java.util.Set.of preserves null-hostility; the precondition above is the actual
+            // public API contract.
+            return setSubscriptionNames(java.util.Collections.singleton(subscriptionName));
+        }
 
         /**
          * Sets the deserialization schema used to deserialize {@link PubsubMessage} for processing.
@@ -293,6 +307,9 @@ public abstract class PubSubSource<OutputT>
 
         public final PubSubSource<OutputT> build() {
             PubSubSource<OutputT> source = autoBuild();
+            Preconditions.checkArgument(
+                    !source.subscriptionNames().isEmpty(),
+                    "subscriptionNames must contain at least one subscription.");
             Preconditions.checkArgument(
                     source.maxOutstandingMessagesCount().or(1L) > 0,
                     "maxOutstandingMessagesCount, if set, must be a value greater than 0.");

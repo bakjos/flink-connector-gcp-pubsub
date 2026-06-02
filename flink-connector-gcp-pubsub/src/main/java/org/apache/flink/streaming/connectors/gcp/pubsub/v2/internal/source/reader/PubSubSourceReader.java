@@ -23,7 +23,6 @@ import org.apache.flink.connector.base.source.reader.SingleThreadMultiplexSource
 import org.apache.flink.connector.base.source.reader.splitreader.SplitReader;
 import org.apache.flink.streaming.connectors.gcp.pubsub.v2.PubSubDeserializationSchemaV2;
 import org.apache.flink.streaming.connectors.gcp.pubsub.v2.internal.source.event.RateLimitChangeEvent;
-import org.apache.flink.streaming.connectors.gcp.pubsub.v2.internal.source.event.SubscriberSettingsChangeEvent;
 import org.apache.flink.streaming.connectors.gcp.pubsub.v2.internal.source.split.SubscriptionSplit;
 import org.apache.flink.streaming.connectors.gcp.pubsub.v2.internal.source.split.SubscriptionSplitState;
 
@@ -35,27 +34,52 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
 
+/**
+ * Pub/Sub source reader.
+ *
+ * <p>Holds the live, mutable rate-limit configuration sourced from {@link RateLimitChangeEvent}s
+ * broadcast by the enumerator. The {@link SplitReaderFactory} receives both the reader-owned
+ * {@link AckTracker} and a {@code Function<splitId, Long>} that reads the latest effective
+ * rate-limit from this reader on every call — that's what lets a live event take effect on the
+ * next fetch without rebuilding the split reader (Plan #1 Phase C addendum, option (b)).
+ */
 public class PubSubSourceReader<T>
         extends SingleThreadMultiplexSourceReaderBase<
                 PubsubMessage, T, SubscriptionSplit, SubscriptionSplitState> {
 
     private static final Logger LOG = LoggerFactory.getLogger(PubSubSourceReader.class);
 
+    /** Factory for the per-reader {@link SplitReader}. */
     public interface SplitReaderFactory {
+        SplitReader<PubsubMessage, SubscriptionSplit> create(
+                AckTracker ackTracker, Function<String, Long> rateLimitLookup);
+    }
+
+    /** Legacy factory preserved for tests that ignore the rate-limit lookup. */
+    public interface LegacySplitReaderFactory {
         SplitReader<PubsubMessage, SubscriptionSplit> create(AckTracker ackTracker);
     }
 
-    private final AckTracker ackTracker;
-
     /**
-     * Source-level rate limit applied by application code that consults
-     * {@link #effectiveRateLimit(String)}. Updated by {@link RateLimitChangeEvent}.
+     * Holder that breaks the constructor-bootstrap cycle: the rate-limit state lives here, so the
+     * supplier passed to {@code super(...)} (before {@code this} is available) can still see a
+     * stable reference and call into {@code lookup}, while the {@code PubSubSourceReader}
+     * instance also exposes the same state to {@link #handleSourceEvents}.
      */
-    private final AtomicReference<Long> sourceLevelRateLimit = new AtomicReference<>();
+    private static final class RateLimitState {
+        final AtomicReference<Long> sourceLevel = new AtomicReference<>();
+        final ConcurrentHashMap<String, Long> perSplit = new ConcurrentHashMap<>();
 
-    /** Per-split rate-limit overrides. Updated by {@link RateLimitChangeEvent}. */
-    private final ConcurrentHashMap<String, Long> perSplitRateLimits = new ConcurrentHashMap<>();
+        Long effective(String splitId) {
+            Long override = perSplit.get(splitId);
+            return override != null ? override : sourceLevel.get();
+        }
+    }
+
+    private final AckTracker ackTracker;
+    private final RateLimitState rateLimitState;
 
     public PubSubSourceReader(
             PubSubDeserializationSchemaV2<T> schema,
@@ -63,12 +87,44 @@ public class PubSubSourceReader<T>
             SplitReaderFactory splitReaderFactory,
             Configuration config,
             SourceReaderContext context) {
+        this(schema, ackTracker, splitReaderFactory, new RateLimitState(), config, context);
+    }
+
+    /** Legacy constructor preserved for tests that pass an {@link LegacySplitReaderFactory}. */
+    public PubSubSourceReader(
+            PubSubDeserializationSchemaV2<T> schema,
+            AckTracker ackTracker,
+            LegacySplitReaderFactory legacyFactory,
+            Configuration config,
+            SourceReaderContext context) {
+        this(
+                schema,
+                ackTracker,
+                (at, ignoredLookup) -> legacyFactory.create(at),
+                new RateLimitState(),
+                config,
+                context);
+    }
+
+    /**
+     * Private constructor that lets the {@code super(...)} call capture the same {@code
+     * RateLimitState} instance later stored in the field — sidestepping the JLS prohibition on
+     * referencing {@code this} in a super-call argument.
+     */
+    private PubSubSourceReader(
+            PubSubDeserializationSchemaV2<T> schema,
+            AckTracker ackTracker,
+            SplitReaderFactory splitReaderFactory,
+            RateLimitState rateLimitState,
+            Configuration config,
+            SourceReaderContext context) {
         super(
-                () -> splitReaderFactory.create(ackTracker),
+                () -> splitReaderFactory.create(ackTracker, rateLimitState::effective),
                 new PubSubRecordEmitter<>(schema, ackTracker),
                 config,
                 context);
         this.ackTracker = ackTracker;
+        this.rateLimitState = rateLimitState;
     }
 
     @Override
@@ -103,11 +159,7 @@ public class PubSubSourceReader<T>
      * back to source-level default; falls back to {@code null} (no limit).
      */
     public Long effectiveRateLimit(String splitId) {
-        Long override = perSplitRateLimits.get(splitId);
-        if (override != null) {
-            return override;
-        }
-        return sourceLevelRateLimit.get();
+        return rateLimitState.effective(splitId);
     }
 
     @Override
@@ -115,35 +167,19 @@ public class PubSubSourceReader<T>
         if (event instanceof RateLimitChangeEvent) {
             RateLimitChangeEvent e = (RateLimitChangeEvent) event;
             if (e.defaultLimit() != null) {
-                sourceLevelRateLimit.set(e.defaultLimit());
+                rateLimitState.sourceLevel.set(e.defaultLimit());
             }
             for (Map.Entry<String, Long> entry : e.perSplitLimits().entrySet()) {
                 if (entry.getValue() == null) {
-                    perSplitRateLimits.remove(entry.getKey());
+                    rateLimitState.perSplit.remove(entry.getKey());
                 } else {
-                    perSplitRateLimits.put(entry.getKey(), entry.getValue());
+                    rateLimitState.perSplit.put(entry.getKey(), entry.getValue());
                 }
             }
             LOG.info(
                     "PubSubSourceReader: applied RateLimitChangeEvent (default={}, overrides={})",
                     e.defaultLimit(),
                     e.perSplitLimits());
-            return;
-        }
-        if (event instanceof SubscriberSettingsChangeEvent) {
-            // The PR-#32 reader does not currently expose a subscriber-rebuild path:
-            // the SplitReader holds a Supplier<NotifyingPullSubscriber> that does not get
-            // re-evaluated on existing splits. Treat this event as informational for now.
-            // A full implementation would propagate the new settings into the
-            // PubSubSplitReader and close + reopen each subscriber with the new builder
-            // settings. Tracked for follow-up (see Plan #1 Phase C notes).
-            SubscriberSettingsChangeEvent e = (SubscriberSettingsChangeEvent) event;
-            LOG.warn(
-                    "PubSubSourceReader: received SubscriberSettingsChangeEvent (timeoutSec={}, "
-                            + "retries={}) but the current PR-#32 reader does not yet support live "
-                            + "subscriber rebuild — settings will not take effect until job restart.",
-                    e.requestTimeoutSec(),
-                    e.requestRetries());
             return;
         }
         super.handleSourceEvents(event);
