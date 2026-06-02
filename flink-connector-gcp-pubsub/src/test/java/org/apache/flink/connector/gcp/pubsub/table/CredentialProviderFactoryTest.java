@@ -196,11 +196,9 @@ class CredentialProviderFactoryTest {
 
         Credentials credentials = ((FixedCredentialsProvider) credentialsProvider).getCredentials();
         assertThat(credentials).isNotNull();
-        assertThat(credentials)
-                .isEqualTo(
-                        GoogleCredentials.create(
-                                new AccessToken(
-                                        "access-token",
-                                        Date.from(java.time.Instant.ofEpochMilli(123)))));
+        assertThat(credentials).isInstanceOf(GoogleCredentials.class);
+        GoogleCredentials google = (GoogleCredentials) credentials;
+        assertThat(google.getAccessToken().getTokenValue()).isEqualTo("access-token");
+        assertThat(google.getAccessToken().getExpirationTime().getTime()).isEqualTo(123L);
     }
 }
