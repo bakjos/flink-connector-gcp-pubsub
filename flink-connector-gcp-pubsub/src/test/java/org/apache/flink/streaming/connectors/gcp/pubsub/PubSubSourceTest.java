@@ -20,9 +20,8 @@ package org.apache.flink.streaming.connectors.gcp.pubsub;
 import org.apache.flink.api.common.io.ratelimiting.FlinkConnectorRateLimiter;
 import org.apache.flink.api.common.serialization.DeserializationSchema;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
-import org.apache.flink.configuration.Configuration;
 import org.apache.flink.metrics.groups.OperatorMetricGroup;
-import org.apache.flink.streaming.api.functions.source.SourceFunction;
+import org.apache.flink.streaming.api.functions.source.legacy.SourceFunction;
 import org.apache.flink.streaming.api.operators.StreamingRuntimeContext;
 import org.apache.flink.streaming.connectors.gcp.pubsub.common.AcknowledgeIdsForCheckpoint;
 import org.apache.flink.streaming.connectors.gcp.pubsub.common.AcknowledgeOnCheckpoint;
@@ -92,7 +91,7 @@ class PubSubSourceTest {
     @Test
     void testOpenWithoutCheckpointing() {
         when(streamingRuntimeContext.isCheckpointingEnabled()).thenReturn(false);
-        assertThatThrownBy(() -> pubSubSource.open((Configuration) null))
+        assertThatThrownBy(() -> pubSubSource.open(null))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
@@ -100,7 +99,7 @@ class PubSubSourceTest {
     void testOpenWithCheckpointing() throws Exception {
         when(streamingRuntimeContext.isCheckpointingEnabled()).thenReturn(true);
 
-        pubSubSource.open((Configuration) null);
+        pubSubSource.open(null);
 
         verify(pubSubSubscriberFactory, times(1)).getSubscriber(eq(credentials));
         verify(acknowledgeOnCheckpointFactory, times(1)).create(pubsubSubscriber);
@@ -119,7 +118,7 @@ class PubSubSourceTest {
 
     @Test
     void testNotifyCheckpointComplete() throws Exception {
-        pubSubSource.open((Configuration) null);
+        pubSubSource.open(null);
         pubSubSource.notifyCheckpointComplete(45L);
 
         verify(acknowledgeOnCheckpoint, times(1)).notifyCheckpointComplete(45L);
@@ -127,7 +126,7 @@ class PubSubSourceTest {
 
     @Test
     void testRestoreState() throws Exception {
-        pubSubSource.open((Configuration) null);
+        pubSubSource.open(null);
 
         List<AcknowledgeIdsForCheckpoint<String>> input = new ArrayList<>();
         pubSubSource.restoreState(input);
@@ -137,7 +136,7 @@ class PubSubSourceTest {
 
     @Test
     void testSnapshotState() throws Exception {
-        pubSubSource.open((Configuration) null);
+        pubSubSource.open(null);
         pubSubSource.snapshotState(1337L, 15000L);
 
         verify(acknowledgeOnCheckpoint, times(1)).snapshotState(1337L, 15000L);
@@ -154,7 +153,7 @@ class PubSubSourceTest {
                         })
                 .when(deserializationSchema)
                 .open(any(DeserializationSchema.InitializationContext.class));
-        pubSubSource.open((Configuration) null);
+        pubSubSource.open(null);
 
         verify(deserializationSchema, times(1))
                 .open(any(DeserializationSchema.InitializationContext.class));

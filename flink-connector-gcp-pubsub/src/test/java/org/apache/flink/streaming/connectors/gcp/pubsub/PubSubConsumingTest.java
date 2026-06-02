@@ -18,9 +18,9 @@
 
 package org.apache.flink.streaming.connectors.gcp.pubsub;
 
+import org.apache.flink.api.common.functions.DefaultOpenContext;
 import org.apache.flink.api.common.serialization.SimpleStringSchema;
 import org.apache.flink.api.common.time.Deadline;
-import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.connectors.gcp.pubsub.common.PubSubSubscriber;
 import org.apache.flink.streaming.util.CollectingSourceContext;
 import org.apache.flink.streaming.util.MockStreamingRuntimeContext;
@@ -179,7 +179,7 @@ class PubSubConsumingTest {
                 () -> {
                     try {
                         pubSubSource.setRuntimeContext(new MockStreamingRuntimeContext(true, 1, 0));
-                        pubSubSource.open(new Configuration());
+                        pubSubSource.open(new DefaultOpenContext());
                         pubSubSource.run(new CollectingSourceContext<>(lock, results));
                     } catch (InterruptedException e) {
                         // expected on cancel
